@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>TEST 彈珠台</title>
+<style>
+  html,body{margin:0;height:100%;background:#07070f;color:#bff;font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  #wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{border-radius:14px;box-shadow:0 0 36px #0ff4,0 0 0 2px #1d3a4a}
+  #ctl{display:none;gap:10px;margin-top:10px;width:min(480px,96vw)}
+  #ctl button{flex:1;height:54px;font-size:20px;border:0;border-radius:12px;background:#12324a;color:#bff;touch-action:none}
+  #ctl button:active{background:#1c6a8c}
+  @media (pointer:coarse){#ctl{display:flex}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="ctl"><button id="bl">◀ 左</button><button id="bs">發射</button><button id="br">右 ▶</button></div>
+</div>
+<script>
+'use strict';
+const W = 480, H = 760, R = 9, G = 900, SUB = 10, MAXV = 1600;
+const FW = 14, FTH = 8;                       // 擋板角速度、半厚度
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const ctl = document.getElementById('ctl');
+  const ch = ctl.offsetHeight ? ctl.offsetHeight + 20 : 0;
+  const s = Math.max(0.2, Math.min(innerWidth / W, (innerHeight - ch - 8) / H));
+  cv.style.width = W * s + 'px';
+  cv.style.height = H * s + 'px';
+  cv.width = Math.round(W * s * dpr);
+  cv.height = Math.round(H * s * dpr);
+  ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+}
+addEventListener('resize', resize);
+
+/* ---------- 音效 ---------- */
+let ac = null, lastBeep = 0;
+function beep(f, d = 0.06, type = 'square', v = 0.04) {
+  try {
+    const now = performance.now();
+    if (now - lastBeep < 35) return;
+    lastBeep = now;
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(v, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + d);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + d);
+  } catch (e) {}
+}
+
+/* ---------- 球檯幾何 ---------- */
+const walls = [];
+function seg(x1, y1, x2, y2, e = 0.5, extra) { walls.push(Object.assign({ x1, y1, x2, y2, e }, extra)); }
+
+// 上方圓弧
+(function () {
+  let px = 20, py = 240;
+  for (let i = 1; i <= 36; i++) {
+    const a = Math.PI + Math.PI * i / 36;
+    const x = 240 + 220 * Math.cos(a), y = 240 + 220 * Math.sin(a);
+    seg(px, py, x, y, 0.4);
+    px = x; py = y;
+  }
+})();
+seg(20, 240, 20, 590);            // 左牆
+seg(460, 240, 460, 720);          // 右牆(發射道外側)
+seg(430, 250, 430, 720);          // 發射道內側
+seg(430, 720, 460, 720);          // 發射道底
+seg(20, 590, 158, 655);           // 左斜坡
+seg(430, 590, 322, 655);          // 右斜坡
+// 彈弓(會彈開球並加分)
+seg(50, 500, 115, 590, 0.5, { kick: 220, score: 10, sling: true, flash: 0 });
+seg(400, 500, 335, 590, 0.5, { kick: 220, score: 10, sling: true, flash: 0 });
+
+const bumpers = [
+  { x: 170, y: 250, r: 26, s: 100, kick: 260, flash: 0, hue: 330 },
+  { x: 300, y: 250, r: 26, s: 100, kick: 260, flash: 0, hue: 190 },
+  { x: 235, y: 355, r: 26, s: 100, kick: 260, flash: 0, hue: 50 },
+  { x: 90,  y: 430, r: 12, s: 25,  kick: 0,   flash: 0, hue: 120 },
+  { x: 370, y: 430, r: 12, s: 25,  kick: 0,   flash: 0, hue: 120 },
+  { x: 235, y: 150, r: 12, s: 50,  kick: 0,   flash: 0, hue: 280 },
+];
+
+const REST = 0.5236; // 30°
+const flippers = [
+  { side: 'l', px: 160, py: 655, len: 70, rest: REST,           act: -REST,           ang: REST,           w: 0 },
+  { side: 'r', px: 320, py: 655, len: 70, rest: Math.PI - REST, act: Math.PI + REST,  ang: Math.PI - REST, w: 0 },
+];
+
+/* ---------- 遊戲狀態 ---------- */
+let score = 0, lives = 3, state = 'ready', power = 0, charging = false, best = 0;
+try { best = +localStorage.getItem('pinball_best') || 0; } catch (e) {}
+const ball = { x: 445, y: 707, vx: 0, vy: 0 };
+
+function newBall() { ball.x = 445; ball.y = 707; ball.vx = 0; ball.vy = 0; state = 'ready'; power = 0; charging = false; }
+function newGame() { score = 0; lives = 3; newBall(); }
+
+/* ---------- 輸入 ---------- */
+const keys = { l: false, r: false };
+const kmap = { ArrowLeft: 'l', KeyZ: 'l', KeyA: 'l', ArrowRight: 'r', KeyM: 'r', KeyL: 'r', Slash: 'r' };
+function pressLaunch() {
+  if (state === 'over') { newGame(); return; }
+  if (state === 'ready') charging = true;
+}
+function releaseLaunch() {
+  if (!charging) return;
+  charging = false;
+  if (power > 0.08) {
+    ball.vx = 0; ball.vy = -(450 + 850 * power);
+    state = 'play';
+    beep(220, 0.18, 'sawtooth', 0.05);
+  }
+  power = 0;
+}
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); pressLaunch(); return; }
+  const k = kmap[e.code];
+  if (k) { e.preventDefault(); keys[k] = true; }
+});
+addEventListener('keyup', e => {
+  if (e.code === 'Space') { releaseLaunch(); return; }
+  const k = kmap[e.code];
+  if (k) keys[k] = false;
+});
+addEventListener('blur', () => { keys.l = keys.r = false; releaseLaunch(); });
+function bindBtn(id, down, up) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('pointerdown', e => { e.preventDefault(); down(); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => el.addEventListener(t, e => { e.preventDefault(); up(); }));
+}
+bindBtn('bl', () => { keys.l = true; }, () => { keys.l = false; });
+bindBtn('br', () => { keys.r = true; }, () => { keys.r = false; });
+bindBtn('bs', pressLaunch, releaseLaunch);
+
+/* ---------- 物理 ---------- */
+// 球與(可能旋轉中的)線段碰撞;只有「迎面撞上」時才回傳法線
+function collideSeg(b, x1, y1, x2, y2, th, e, w, ox, oy) {
+  const dx = x2 - x1, dy = y2 - y1;
+  let t = ((b.x - x1) * dx + (b.y - y1) * dy) / (dx * dx + dy * dy);
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + dx * t, cy = y1 + dy * t;
+  let nx = b.x - cx, ny = b.y - cy;
+  const d = Math.hypot(nx, ny), min = R + th;
+  if (d >= min || d === 0) return null;
+  nx /= d; ny /= d;
+  b.x = cx + nx * min; b.y = cy + ny * min;
+  const vsx = w ? -w * (cy - oy) : 0, vsy = w ? w * (cx - ox) : 0;   // 擋板表面速度
+  const rvx = b.vx - vsx, rvy = b.vy - vsy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn >= 0) return null;
+  b.vx -= (1 + e) * vn * nx;
+  b.vy -= (1 + e) * vn * ny;
+  return { nx, ny };
+}
+
+function addScore(s, obj) {
+  score += s;
+  obj.flash = 0.18;
+  beep(300 + Math.min(600, s * 4), 0.07);
+}
+
+function loseBall() {
+  lives--;
+  beep(120, 0.4, 'triangle', 0.06);
+  if (lives <= 0) {
+    state = 'over';
+    if (score > best) { best = score; try { localStorage.setItem('pinball_best', best); } catch (e) {} }
+  } else newBall();
+}
+
+function step(dt) {
+  for (const f of flippers) {
+    const target = (f.side === 'l' ? keys.l : keys.r) ? f.act : f.rest;
+    const diff = target - f.ang, st = FW * dt;
+    if (Math.abs(diff) <= st) { f.ang = target; f.w = 0; }
+    else { f.ang += Math.sign(diff) * st; f.w = Math.sign(diff) * FW; }
+  }
+  ball.vy += G * dt;
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+  const sp = Math.hypot(ball.vx, ball.vy);
+  if (sp > MAXV) { ball.vx *= MAXV / sp; ball.vy *= MAXV / sp; }
+
+  for (const w of walls) {
+    const n = collideSeg(ball, w.x1, w.y1, w.x2, w.y2, 1, w.e, 0, 0, 0);
+    if (n && w.kick) {
+      ball.vx += n.nx * w.kick; ball.vy += n.ny * w.kick;
+      addScore(w.score, w);
+    }
+  }
+  for (const b of bumpers) {
+    const dx = ball.x - b.x, dy = ball.y - b.y, d = Math.hypot(dx, dy), min = R + b.r;
+    if (d < min && d > 0) {
+      const nx = dx / d, ny = dy / d;
+      ball.x = b.x + nx * min; ball.y = b.y + ny * min;
+      const vn = ball.vx * nx + ball.vy * ny;
+      if (vn < 0) {
+        const e = b.kick ? 1 : 0.6;
+        ball.vx -= (1 + e) * vn * nx; ball.vy -= (1 + e) * vn * ny;
+        ball.vx += nx * b.kick; ball.vy += ny * b.kick;
+        addScore(b.s, b);
+      }
+    }
+  }
+  for (const f of flippers) {
+    const tx = f.px + f.len * Math.cos(f.ang), ty = f.py + f.len * Math.sin(f.ang);
+    collideSeg(ball, f.px, f.py, tx, ty, FTH, 0.35, f.w, f.px, f.py);
+  }
+}
+
+/* ---------- 繪圖 ---------- */
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0b0b1c'); bg.addColorStop(1, '#14102a');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  // 牆
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.shadowColor = '#0ff'; ctx.shadowBlur = 10;
+  ctx.strokeStyle = '#5ee'; ctx.lineWidth = 3;
+  for (const w of walls) {
+    if (w.sling) continue;
+    ctx.beginPath(); ctx.moveTo(w.x1, w.y1); ctx.lineTo(w.x2, w.y2); ctx.stroke();
+  }
+  // 彈弓
+  for (const w of walls) {
+    if (!w.sling) continue;
+    ctx.strokeStyle = w.flash > 0 ? '#fff' : '#f6a'; ctx.shadowColor = '#f6a';
+    ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(w.x1, w.y1); ctx.lineTo(w.x2, w.y2); ctx.stroke();
+  }
+  // 彈跳器
+  for (const b of bumpers) {
+    const on = b.flash > 0;
+    ctx.shadowColor = `hsl(${b.hue},100%,60%)`; ctx.shadowBlur = on ? 28 : 12;
+    ctx.fillStyle = on ? '#fff' : `hsl(${b.hue},80%,${b.kick ? 45 : 38}%)`;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r + (on ? 3 : 0), 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = `hsl(${b.hue},100%,80%)`; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r - 5, 0, Math.PI * 2); ctx.stroke();
+    if (b.kick) {
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('100', b.x, b.y + 1);
+    }
+  }
+  // 擋板
+  ctx.shadowColor = '#fc3'; ctx.shadowBlur = 12;
+  for (const f of flippers) {
+    const tx = f.px + f.len * Math.cos(f.ang), ty = f.py + f.len * Math.sin(f.ang);
+    ctx.strokeStyle = '#fc3'; ctx.lineWidth = FTH * 2;
+    ctx.beginPath(); ctx.moveTo(f.px, f.py); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.strokeStyle = '#fff6c0'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(f.px, f.py); ctx.lineTo(tx, ty); ctx.stroke();
+  }
+  // 蓄力條(發射道下方)
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#345'; ctx.lineWidth = 2;
+  ctx.strokeRect(437, 726, 16, 28);
+  ctx.fillStyle = power > 0.66 ? '#4f8' : '#fa3';
+  ctx.fillRect(438, 753 - 26 * power, 14, 26 * power);
+
+  // 球
+  if (state !== 'over') {
+    const g = ctx.createRadialGradient(ball.x - 3, ball.y - 3, 1, ball.x, ball.y, R);
+    g.addColorStop(0, '#fff'); g.addColorStop(1, '#9ab');
+    ctx.shadowColor = '#fff'; ctx.shadowBlur = 8;
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, R, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // HUD
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left'; ctx.fillStyle = '#bff'; ctx.font = 'bold 20px system-ui';
+  ctx.fillText('分數 ' + score, 10, 28);
+  ctx.font = '13px system-ui'; ctx.fillStyle = '#8ab';
+  ctx.fillText('最高 ' + best, 10, 48);
+  ctx.textAlign = 'right'; ctx.font = 'bold 20px system-ui'; ctx.fillStyle = '#bff';
+  ctx.fillText('球 ' + '●'.repeat(Math.max(0, lives)), W - 10, 28);
+
+  ctx.textAlign = 'center';
+  if (state === 'ready') {
+    ctx.fillStyle = 'rgba(7,7,15,.7)'; ctx.fillRect(70, 455, 290, 58);
+    ctx.fillStyle = '#bff'; ctx.font = '16px system-ui';
+    ctx.fillText('按住 空白鍵 蓄力,放開發射', 215, 480);
+    ctx.fillStyle = '#8ab'; ctx.font = '13px system-ui';
+    ctx.fillText('← / Z 左擋板    → / M 右擋板', 215, 502);
+  } else if (state === 'over') {
+    ctx.fillStyle = 'rgba(7,7,15,.8)'; ctx.fillRect(50, 420, 340, 110);
+    ctx.fillStyle = '#f66'; ctx.font = 'bold 36px system-ui';
+    ctx.fillText('GAME OVER', 220, 465);
+    ctx.fillStyle = '#bff'; ctx.font = '16px system-ui';
+    ctx.fillText('得分 ' + score + (score >= best && score > 0 ? '  🏆 新紀錄!' : ''), 220, 492);
+    ctx.fillStyle = '#8ab'; ctx.font = '14px system-ui';
+    ctx.fillText('按 空白鍵 重新開始', 220, 516);
+  }
+}
+
+/* ---------- 主迴圈 ---------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, Math.max(0, (now - last) / 1000));
+  last = now;
+  if (state !== 'over') {
+    if (charging) power = Math.min(1, power + dt / 1.1);
+    const h = dt / SUB;
+    for (let i = 0; i < SUB; i++) step(h);
+    if (!(isFinite(ball.x) && isFinite(ball.y))) newBall();
+    if (ball.y > H + 30) loseBall();
+    // 球掉回發射道並停住 → 可再次發射
+    if (state === 'play' && ball.x > 432 && ball.y > 690 && Math.hypot(ball.vx, ball.vy) < 25) state = 'ready';
+  }
+  for (const b of bumpers) if (b.flash > 0) b.flash -= dt;
+  for (const w of walls) if (w.flash > 0) w.flash -= dt;
+  draw();
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
