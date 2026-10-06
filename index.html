@@ -7,7 +7,22 @@
 <style>
   html,body{margin:0;height:100%;background:#07070f;color:#bff;font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   #wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center}
-  canvas{border-radius:14px;box-shadow:0 0 36px #0ff4,0 0 0 2px #1d3a4a}
+  canvas{display:block;border-radius:14px;box-shadow:0 0 36px #0ff4,0 0 0 2px #1d3a4a}
+  #stage{position:relative}
+  .ov{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,5,14,.84);border-radius:14px;z-index:5}
+  .ov.show{display:flex}
+  .card{width:80%;max-height:90%;overflow:auto;background:#0d1a26;border:1px solid #5ee;border-radius:14px;padding:16px;box-shadow:0 0 24px #0ff5;text-align:center;box-sizing:border-box}
+  .card h2{margin:0 0 10px;font-size:20px;color:#fff}
+  .card ol{list-style:none;margin:0;padding:0;text-align:left}
+  .card li{display:flex;gap:8px;padding:5px 8px;border-radius:6px;font-size:15px}
+  .card li.me{background:#12324a;color:#fff;box-shadow:0 0 8px #0ff5}
+  .card li .rk{width:28px;color:#8ab}
+  .card li .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card li .sc{font-variant-numeric:tabular-nums}
+  .card .sub{color:#8ab;font-size:13px;margin-top:10px}
+  .card input{width:80%;height:42px;font-size:18px;text-align:center;border-radius:8px;border:1px solid #5ee;background:#07101a;color:#fff;margin:10px 0;-webkit-user-select:text;user-select:text;box-sizing:border-box}
+  .card button{height:40px;padding:0 20px;margin:4px;font-size:16px;border:0;border-radius:10px;background:#12324a;color:#bff;cursor:pointer}
+  #sel #lbBtn{flex:0 0 52px}
   #sel{display:flex;gap:8px;margin-bottom:8px;width:min(480px,96vw)}
   #sel button{flex:1;height:36px;font-size:15px;border:1px solid #1d3a4a;border-radius:10px;background:#0d1a26;color:#8ab;cursor:pointer}
   #sel button.on{background:#12324a;color:#fff;border-color:#5ee;box-shadow:0 0 10px #0ff5}
@@ -20,7 +35,18 @@
 <body>
 <div id="wrap">
   <div id="sel"></div>
-  <canvas id="c"></canvas>
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="lbOv" class="ov"><div class="card">
+      <h2 id="lbTitle"></h2><ol id="lbList"></ol>
+      <div class="sub">點任意處或按空白鍵關閉</div>
+    </div></div>
+    <div id="enOv" class="ov"><div class="card">
+      <h2>🏆 進榜了!</h2><div id="enScore"></div>
+      <input id="enName" maxlength="10" placeholder="輸入你的名字" autocomplete="off">
+      <div><button id="enOk">儲存</button><button id="enSkip">略過</button></div>
+    </div></div>
+  </div>
   <div id="ctl"><button id="bl">◀ 左</button><button id="bs">發射</button><button id="br">右 ▶</button></div>
 </div>
 <script>
@@ -29,6 +55,8 @@ const W = 480, H = 760, R = 9, G = 900, SUB = 10, MAXV = 1600;
 const FW = 14, FTH = 8;                       // 擋板角速度、半厚度
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const selEl = document.getElementById('sel');
+const lbOv = document.getElementById('lbOv'), lbTitle = document.getElementById('lbTitle'), lbList = document.getElementById('lbList');
+const enOv = document.getElementById('enOv'), enScore = document.getElementById('enScore'), enName = document.getElementById('enName');
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
@@ -155,6 +183,7 @@ function selectTable(i) {
   TABLES[i].build();
   for (const f of flippers) { f.ang = f.rest; f.w = 0; }
   [...selEl.children].forEach((b, k) => b.classList.toggle('on', k === i));
+  lbOv.classList.remove('show'); enOv.classList.remove('show'); updatePaused(); lastRank = -1;
   newGame();
 }
 TABLES.forEach((t, i) => {
@@ -164,10 +193,86 @@ TABLES.forEach((t, i) => {
   selEl.appendChild(b);
 });
 
+/* ---------- 排行榜(每個檯面前 10 名,存在瀏覽器) ---------- */
+const LB_MAX = 10;
+let paused = false, lastRank = -1;
+function loadLB(i) {
+  try {
+    const a = JSON.parse(localStorage.getItem('pinball_lb_' + i) || '[]');
+    return Array.isArray(a) ? a.filter(r => r && typeof r.s === 'number').slice(0, LB_MAX) : [];
+  } catch (e) { return []; }
+}
+function saveLB(i, a) { try { localStorage.setItem('pinball_lb_' + i, JSON.stringify(a)); } catch (e) {} }
+function qualifies(s) {
+  if (s <= 0) return false;
+  const a = loadLB(tableIdx);
+  return a.length < LB_MAX || s > a[a.length - 1].s;
+}
+function updatePaused() { paused = lbOv.classList.contains('show') || enOv.classList.contains('show'); }
+function showLB(hl) {
+  const a = loadLB(tableIdx);
+  lbTitle.textContent = '🏆 ' + TABLES[tableIdx].name + ' 排行榜';
+  lbList.textContent = '';
+  if (!a.length) {
+    const li = document.createElement('li');
+    li.textContent = '還沒有紀錄,來創第一名!';
+    lbList.appendChild(li);
+  }
+  a.forEach((r, k) => {
+    const li = document.createElement('li');
+    if (k === hl) li.className = 'me';
+    const rk = document.createElement('span'), nm = document.createElement('span'), sc = document.createElement('span');
+    rk.className = 'rk'; nm.className = 'nm'; sc.className = 'sc';
+    rk.textContent = k === 0 ? '🥇' : k === 1 ? '🥈' : k === 2 ? '🥉' : (k + 1);
+    nm.textContent = String(r.n || '無名氏');
+    sc.textContent = r.s;
+    li.append(rk, nm, sc);
+    lbList.appendChild(li);
+  });
+  lbOv.classList.add('show');
+  updatePaused();
+}
+function hideLB() { lbOv.classList.remove('show'); updatePaused(); }
+function openEntry() {
+  enScore.textContent = '得分 ' + score + '(' + TABLES[tableIdx].name + ')';
+  try { enName.value = localStorage.getItem('pinball_name') || ''; } catch (e) { enName.value = ''; }
+  enOv.classList.add('show');
+  updatePaused();
+  setTimeout(() => { enName.focus(); enName.select(); }, 50);
+}
+function submitEntry(save) {
+  enOv.classList.remove('show');
+  enName.blur();
+  if (save) {
+    const n = enName.value.trim().slice(0, 10) || '無名氏';
+    try { localStorage.setItem('pinball_name', n); } catch (e) {}
+    const a = loadLB(tableIdx);
+    const entry = { n, s: score, d: Date.now() };
+    a.push(entry);
+    a.sort((x, y) => y.s - x.s);
+    lastRank = a.indexOf(entry);
+    a.length = Math.min(a.length, LB_MAX);
+    saveLB(tableIdx, a);
+    updatePaused();
+    showLB(lastRank);
+  } else updatePaused();
+}
+document.getElementById('enOk').addEventListener('click', () => submitEntry(true));
+document.getElementById('enSkip').addEventListener('click', () => submitEntry(false));
+enName.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitEntry(true); } });
+lbOv.addEventListener('pointerdown', e => { e.preventDefault(); hideLB(); });
+(function () {
+  const b = document.createElement('button');
+  b.id = 'lbBtn'; b.textContent = '🏆'; b.title = '排行榜';
+  b.addEventListener('click', () => { showLB(-1); b.blur(); });
+  selEl.appendChild(b);
+})();
+
 /* ---------- 輸入 ---------- */
 const keys = { l: false, r: false };
 const kmap = { ArrowLeft: 'l', KeyZ: 'l', KeyA: 'l', ArrowRight: 'r', KeyM: 'r', KeyL: 'r', Slash: 'r' };
 function pressLaunch() {
+  if (paused) return;
   if (state === 'over') { newGame(); return; }
   if (state === 'ready') charging = true;
 }
@@ -182,6 +287,11 @@ function releaseLaunch() {
   power = 0;
 }
 addEventListener('keydown', e => {
+  if (e.target && e.target.tagName === 'INPUT') return;           // 輸入名字時不觸發遊戲按鍵
+  if (lbOv.classList.contains('show')) {
+    if (e.code === 'Space' || e.code === 'Escape' || e.code === 'Enter') { e.preventDefault(); hideLB(); }
+    return;
+  }
   if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) pressLaunch(); return; }
   if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') { selectTable(+e.code.slice(5) - 1); return; }
   const k = kmap[e.code];
@@ -236,6 +346,8 @@ function loseBall() {
   if (lives <= 0) {
     state = 'over';
     if (score > bests[tableIdx]) { bests[tableIdx] = score; try { localStorage.setItem('pinball_best_' + tableIdx, score); } catch (e) {} }
+    lastRank = -1;
+    if (qualifies(score)) openEntry();
   } else newBall();
 }
 
@@ -364,13 +476,15 @@ function draw() {
     ctx.fillText('← / Z 左擋板    → / M 右擋板', 215, 564);
     ctx.fillText(TABLES[tableIdx].hint + '(按 1/2/3 換檯面)', 215, 580);
   } else if (state === 'over') {
-    ctx.fillStyle = 'rgba(7,7,15,.8)'; ctx.fillRect(50, 420, 340, 110);
+    ctx.fillStyle = 'rgba(7,7,15,.8)'; ctx.fillRect(50, 420, 340, 130);
     ctx.fillStyle = '#f66'; ctx.font = 'bold 36px system-ui';
     ctx.fillText('GAME OVER', 220, 465);
     ctx.fillStyle = '#bff'; ctx.font = '16px system-ui';
     ctx.fillText('得分 ' + score + (score >= bests[tableIdx] && score > 0 ? '  🏆 新紀錄!' : ''), 220, 492);
     ctx.fillStyle = '#8ab'; ctx.font = '14px system-ui';
     ctx.fillText('按 空白鍵 重新開始', 220, 516);
+    ctx.fillStyle = '#6ab';
+    ctx.fillText(lastRank >= 0 ? '排行榜第 ' + (lastRank + 1) + ' 名!' : '上方 🏆 查看排行榜', 220, 538);
   }
 }
 
@@ -379,7 +493,7 @@ let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.033, Math.max(0, (now - last) / 1000));
   last = now;
-  if (state !== 'over') {
+  if (state !== 'over' && !paused) {
     if (charging) power = Math.min(1, power + dt / 1.1);
     const h = dt / SUB;
     for (let i = 0; i < SUB; i++) step(h);
